@@ -1,0 +1,6 @@
+*.pdf
+*.sh
+*.pth
+*.txt
+__pycache__
+dataset
