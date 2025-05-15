@@ -4,7 +4,7 @@ import cv2
 
 from tools.sequence_utils import VOTSequence
 from tools.sequence_utils import save_results
-from siamfc import TrackerSiamFC
+from siamfc import TrackerSiamFC, ops
 
 
 def evaluate_tracker(dataset_path, network_path, results_dir, visualize):
@@ -41,6 +41,7 @@ def evaluate_tracker(dataset_path, network_path, results_dir, visualize):
 
             img = cv2.imread(sequence.frame(i))
             prediction, score = tracker.update(img)
+            ops.show_image(img, prediction)
             results.append(prediction)
             scores.append([score])
 

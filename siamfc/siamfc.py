@@ -162,132 +162,119 @@ class TrackerSiamFC(Tracker):
     def update(self, img):
         # set to evaluation mode
         self.net.eval()
-        if not self.target_lost:
-            # search images
-            x = [ops.crop_and_resize(
-                img, self.center, self.x_sz * f,
-                out_size=self.cfg.instance_sz,
-                border_value=self.avg_color) for f in self.scale_factors]
-            x = np.stack(x, axis=0)
-            x = torch.from_numpy(x).to(
-                self.device).permute(0, 3, 1, 2).float()
-            
-            # responses
-            x = self.net.backbone(x)
-            responses = self.net.head(self.kernel, x)
-            responses = responses.squeeze(1).cpu().numpy()
 
-            # upsample responses and penalize scale changes
-            responses = np.stack([cv2.resize(
-                u, (self.upscale_sz, self.upscale_sz),
-                interpolation=cv2.INTER_CUBIC)
-                for u in responses])
-            responses[:self.cfg.scale_num // 2] *= self.cfg.scale_penalty
-            responses[self.cfg.scale_num // 2 + 1:] *= self.cfg.scale_penalty
+        # search images
+        x = [ops.crop_and_resize(
+            img, self.center, self.x_sz * f,
+            out_size=self.cfg.instance_sz,
+            border_value=self.avg_color) for f in self.scale_factors]
+        x = np.stack(x, axis=0)
+        x = torch.from_numpy(x).to(
+            self.device).permute(0, 3, 1, 2).float()
+        
+        # responses
+        x = self.net.backbone(x)
+        responses = self.net.head(self.kernel, x)
+        responses = responses.squeeze(1).cpu().numpy()
 
-            # peak scale
-            scale_id = np.argmax(np.amax(responses, axis=(1, 2)))
+        # upsample responses and penalize scale changes
+        responses = np.stack([cv2.resize(
+            u, (self.upscale_sz, self.upscale_sz),
+            interpolation=cv2.INTER_CUBIC)
+            for u in responses])
+        responses[:self.cfg.scale_num // 2] *= self.cfg.scale_penalty
+        responses[self.cfg.scale_num // 2 + 1:] *= self.cfg.scale_penalty
 
-            # peak location
-            response = responses[scale_id]
-            max_resp = max(0, response.max())
+        # peak scale
+        scale_id = np.argmax(np.amax(responses, axis=(1, 2)))
 
-            response -= response.min()
-            response /= response.sum() + 1e-16
-            response = (1 - self.cfg.window_influence) * response + \
-                self.cfg.window_influence * self.hann_window
-            loc = np.unravel_index(response.argmax(), response.shape)
+        # peak location
+        response = responses[scale_id]
+        max_resp = max(0, response.max())
+
+        response -= response.min()
+        response /= response.sum() + 1e-16
+        response = (1 - self.cfg.window_influence) * response + \
+            self.cfg.window_influence * self.hann_window
+        loc = np.unravel_index(response.argmax(), response.shape)
 
 
-            #detect failure based on reliability score
-            exclude_radius = 5
-            mask = np.ones_like(response, dtype=bool)
-            y, x = loc
-            y1, y2 = max(0, y - exclude_radius), min(response.shape[0], y + exclude_radius + 1)
-            x1, x2 = max(0, x - exclude_radius), min(response.shape[1], x + exclude_radius + 1)
-            mask[y1:y2, x1:x2] = False
-            sidelobe = response[mask]
-            psr = (max_resp - sidelobe.mean()) / (sidelobe.std() + 1e-6)
+        #detect failure based on reliability score
+        exclude_radius = 5
+        mask = np.ones_like(response, dtype=bool)
+        y, x = loc
+        y1, y2 = max(0, y - exclude_radius), min(response.shape[0], y + exclude_radius + 1)
+        x1, x2 = max(0, x - exclude_radius), min(response.shape[1], x + exclude_radius + 1)
+        mask[y1:y2, x1:x2] = False
+        sidelobe = response[mask]
+        psr = (max_resp - sidelobe.mean()) / (sidelobe.std() + 1e-6)
 
-            qt_cur = max_resp * psr
-            ratio = np.mean(self.previous_qt) / qt_cur
-
-            self.previous_qt.append(qt_cur)
-
-            if ratio > self.reliability_threshold:
-                #The tracker has failed and we need to try and relocalize the target.
-                self.target_lost = True
-
+        qt_cur = max_resp * psr
+        ratio = np.mean(self.previous_qt) / qt_cur
+        self.target_lost = False
+        if max_resp < self.reliability_threshold:
+            #The tracker has failed and we need to try and relocalize the target.
+            self.target_lost = True
+        
+        
         if self.target_lost:
-            found, loc, box, resp = self.relocalize(img)
-            if found:
-                print("Target found")
-                self.target_lost = False
-            if not found:
-                print("target not found")
-                return(box, resp)
+            box, max_resp = self.relocalize(img)
+            return box, max_resp
 
-        if not self.target_lost:
-        # locate target center
-            disp_in_response = np.array(loc) - (self.upscale_sz - 1) / 2
-            disp_in_instance = disp_in_response * \
-                self.cfg.total_stride / self.cfg.response_up
-            disp_in_image = disp_in_instance * self.x_sz * \
-                self.scale_factors[scale_id] / self.cfg.instance_sz
-            self.center += disp_in_image
+        self.previous_qt.append(qt_cur)
+        
+                # locate target center
+        disp_in_response = np.array(loc) - (self.upscale_sz - 1) / 2
+        disp_in_instance = disp_in_response * \
+            self.cfg.total_stride / self.cfg.response_up
+        disp_in_image = disp_in_instance * self.x_sz * \
+            self.scale_factors[scale_id] / self.cfg.instance_sz
+        self.center += disp_in_image
 
-            # update target size
-            scale =  (1 - self.cfg.scale_lr) * 1.0 + \
-                self.cfg.scale_lr * self.scale_factors[scale_id]
-            self.target_sz *= scale
-            self.z_sz *= scale
-            self.x_sz *= scale
+        # update target size
+        scale =  (1 - self.cfg.scale_lr) * 1.0 + \
+            self.cfg.scale_lr * self.scale_factors[scale_id]
+        self.target_sz *= scale
+        self.z_sz *= scale
+        self.x_sz *= scale
 
-            # return 1-indexed and left-top based bounding box
-            box = np.array([
-                self.center[1] + 1 - (self.target_sz[1] - 1) / 2,
-                self.center[0] + 1 - (self.target_sz[0] - 1) / 2,
-                self.target_sz[1], self.target_sz[0]])
+        # return 1-indexed and left-top based bounding box
+        box = np.array([
+            self.center[1] + 1 - (self.target_sz[1] - 1) / 2,
+            self.center[0] + 1 - (self.target_sz[0] - 1) / 2,
+            self.target_sz[1], self.target_sz[0]])
 
-        ops.show_image(img, box)
+        
         return box, max_resp
 
     def relocalize(self, img):
         h, w = img.shape[:2]
-        best_response = 0
+        best_response = -100000
+        boxes = []
 
-        for _ in range(20):
+        for _ in range(50):
             cy = np.random.uniform(0, h)
             cx = np.random.uniform(0, w)
-            center = np.array([cy, cx])
-            x = [ops.crop_and_resize(
-                img, center, self.x_sz * f,
+            center = np.array([cx, cy])
+            x = ops.crop_and_resize(
+                img, center, self.x_sz,
                 out_size=self.cfg.instance_sz,
-                border_value=self.avg_color) for f in self.scale_factors]
-            x = np.stack(x, axis=0)
-            x = torch.from_numpy(x).to(
-                self.device).permute(0, 3, 1, 2).float()
+                border_value=self.avg_color)
+            
+            x = torch.from_numpy(x).to(self.device).permute(2, 0, 1).unsqueeze(0).float()
             
             # responses
             x = self.net.backbone(x)
-            responses = self.net.head(self.kernel, x)
-            responses = responses.squeeze(1).cpu().numpy()
+            response = self.net.head(self.kernel, x)
+            response = response.squeeze(0).squeeze(0).cpu().numpy()
 
             # upsample responses and penalize scale changes
-            responses = np.stack([cv2.resize(
-                u, (self.upscale_sz, self.upscale_sz),
+            response = cv2.resize(response, (self.upscale_sz, self.upscale_sz),
                 interpolation=cv2.INTER_CUBIC)
-                for u in responses])
-            responses[:self.cfg.scale_num // 2] *= self.cfg.scale_penalty
-            responses[self.cfg.scale_num // 2 + 1:] *= self.cfg.scale_penalty
-
-            # peak scale
-            scale_id = np.argmax(np.amax(responses, axis=(1, 2)))
-
+            
             # peak location
-            response = responses[scale_id]
-            max_resp = max(0, response.max())
 
+            max_resp = max(0, response.max())
             response -= response.min()
             response /= response.sum() + 1e-16
             response = (1 - self.cfg.window_influence) * response + \
@@ -307,34 +294,20 @@ class TrackerSiamFC(Tracker):
 
             qt_cur = max_resp * psr
             ratio = np.mean(self.previous_qt) / qt_cur
-
+            box = np.array([
+                cy + 1 - (self.target_sz[1] - 1) / 2,
+                cx + 1 - (self.target_sz[0] - 1) / 2,
+                self.target_sz[1], self.target_sz[0]])
+            
             if best_response < max_resp:
                 best_response = max_resp
-                disp_in_response = np.array(loc) - (self.upscale_sz - 1) / 2
-                disp_in_instance = disp_in_response * \
-                    self.cfg.total_stride / self.cfg.response_up
-                disp_in_image = disp_in_instance * self.x_sz * \
-                    self.scale_factors[scale_id] / self.cfg.instance_sz
-                center += disp_in_image
+                self.center = np.array([cx, cy])
 
-                # update target size
-                # scale =  (1 - self.cfg.scale_lr) * 1.0 + \
-                #     self.cfg.scale_lr * self.scale_factors[scale_id]
-                # self.target_sz *= scale
-                # self.z_sz *= scale
-                # self.x_sz *= scale
-
-                # return 1-indexed and left-top based bounding box
-                box = np.array([
-                    center[1] + 1 - (self.target_sz[1] - 1) / 2,
-                    center[0] + 1 - (self.target_sz[0] - 1) / 2,
-                    self.target_sz[1], self.target_sz[0]])
-
-            if ratio < self.reliability_threshold:
-                print(ratio)
-                return True, loc, box, max_resp
-            
-        return False, loc, box, max_resp
+        box = np.array([
+                self.center[1] + 1 - (self.target_sz[1] - 1) / 2,
+                self.center[0] + 1 - (self.target_sz[0] - 1) / 2,
+                self.target_sz[1], self.target_sz[0]])
+        return box, max_resp
         
     
     def train_step(self, batch, backward=True):
