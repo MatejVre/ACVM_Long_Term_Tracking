@@ -80,8 +80,13 @@ class TrackerSiamFC(Tracker):
         #PARAMS FOR LT TRACKER
         ################################################
         self.previous_qt = []
-        self.reliability_threshold = 4
+        self.reliability_threshold = 3
         self.target_lost = False
+        self.frames = 0
+        self.boxes = []
+        self.had_to_find = False
+        self.confident_position = None
+        self.sigma = 40
 
     def parse_args(self, **kwargs):
         # default parameters
@@ -212,14 +217,35 @@ class TrackerSiamFC(Tracker):
         qt_cur = max_resp * psr
         ratio = np.mean(self.previous_qt) / qt_cur
         self.target_lost = False
-        if max_resp < self.reliability_threshold:
+
+        if ratio > self.reliability_threshold:
             #The tracker has failed and we need to try and relocalize the target.
+            # print("lost")
             self.target_lost = True
+            self.had_to_find = True
         
         
-        if self.target_lost:
-            box, max_resp = self.relocalize(img)
-            return box, max_resp
+        # if self.target_lost:
+        #     box, max_resp = self.relocalize(img, "gauss")
+
+        #     for box in self.boxes:
+
+        #         x1,y1 = int(box[0]), int(box[1])
+        #         x2, y2 = int(box[0]  + self.target_sz[1]), int(box[1] + self.target_sz[0])
+        #         cv2.rectangle(img, (x1,y1), (x2,y2), (0,0,255), 3)
+
+        #     cv2.imshow("Result", img)
+        #     key = cv2.waitKey(0)
+        #     counter = 1
+        #     if key == ord('s'):  
+        #         cv2.imwrite(f"saved_{counter}.png", img)
+        #         counter += 1
+        #     cv2.destroyAllWindows()
+        #     return box, max_resp
+
+        # if self.frames != 0:
+        #     # print(self.frames)
+        #     self.frames = 0
 
         self.previous_qt.append(qt_cur)
         
@@ -243,18 +269,45 @@ class TrackerSiamFC(Tracker):
             self.center[1] + 1 - (self.target_sz[1] - 1) / 2,
             self.center[0] + 1 - (self.target_sz[0] - 1) / 2,
             self.target_sz[1], self.target_sz[0]])
+        
+        self.confident_position = self.center
 
+
+        # if self.had_to_find:
+        #     x1,y1 = int(box[0]), int(box[1])
+        #     x2, y2 = int(box[0]  + self.target_sz[1]), int(box[1] + self.target_sz[0])
+        #     cv2.rectangle(img, (x1,y1), (x2,y2), (0,255,0), 3)
+
+        #     for box in self.boxes:
+
+        #         x1,y1 = int(box[0]), int(box[1])
+        #         x2, y2 = int(box[0]  + self.target_sz[1]), int(box[1] + self.target_sz[0])
+        #         cv2.rectangle(img, (x1,y1), (x2,y2), (0,0,255), 3)
+
+        #     cv2.imshow("Result", img)
+        #     key = cv2.waitKey(0)
+        #     if key == ord('s'):  
+        #         cv2.imwrite(f"saved_2.png", img)
+        #         counter += 1
+        #     cv2.destroyAllWindows()
         
         return box, max_resp
 
-    def relocalize(self, img):
+    def relocalize(self, img, method="uniform"):
         h, w = img.shape[:2]
         best_response = -100000
-        boxes = []
+        best_ratio = 100000000000000
+        self.boxes = []
+        self.frames += 1
 
-        for _ in range(50):
-            cy = np.random.uniform(0, h)
-            cx = np.random.uniform(0, w)
+        for _ in range(20):
+            if method == "uniform":
+                cy = np.random.uniform(0, h)
+                cx = np.random.uniform(0, w)
+            
+            if method == "gauss":
+                cy = np.random.normal(self.confident_position[1], self.sigma)
+                cx = np.random.normal(self.confident_position[0], self.sigma)
             center = np.array([cx, cy])
             x = ops.crop_and_resize(
                 img, center, self.x_sz,
@@ -293,13 +346,19 @@ class TrackerSiamFC(Tracker):
             psr = (max_resp - sidelobe.mean()) / (sidelobe.std() + 1e-6)
 
             qt_cur = max_resp * psr
+            if not np.isfinite(qt_cur) or qt_cur <= 0:
+                continue
             ratio = np.mean(self.previous_qt) / qt_cur
             box = np.array([
                 cy + 1 - (self.target_sz[1] - 1) / 2,
                 cx + 1 - (self.target_sz[0] - 1) / 2,
                 self.target_sz[1], self.target_sz[0]])
+
+            self.boxes.append(box)
             
-            if best_response < max_resp:
+            if ratio < best_ratio:
+                # print(ratio)
+                best_ratio = ratio
                 best_response = max_resp
                 self.center = np.array([cx, cy])
 
@@ -307,7 +366,7 @@ class TrackerSiamFC(Tracker):
                 self.center[1] + 1 - (self.target_sz[1] - 1) / 2,
                 self.center[0] + 1 - (self.target_sz[0] - 1) / 2,
                 self.target_sz[1], self.target_sz[0]])
-        return box, max_resp
+        return box, best_response
         
     
     def train_step(self, batch, backward=True):

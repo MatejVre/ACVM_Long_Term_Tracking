@@ -41,7 +41,7 @@ def evaluate_tracker(dataset_path, network_path, results_dir, visualize):
 
             img = cv2.imread(sequence.frame(i))
             prediction, score = tracker.update(img)
-            ops.show_image(img, prediction)
+            #ops.show_image(img, prediction)
             results.append(prediction)
             scores.append([score])
 
