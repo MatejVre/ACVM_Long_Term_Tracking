@@ -86,7 +86,7 @@ class TrackerSiamFC(Tracker):
         self.boxes = []
         self.had_to_find = False
         self.confident_position = None
-        self.sigma = 40
+        self.sigma = 100
 
     def parse_args(self, **kwargs):
         # default parameters
@@ -225,9 +225,9 @@ class TrackerSiamFC(Tracker):
             self.had_to_find = True
         
         
-        # if self.target_lost:
-        #     box, max_resp = self.relocalize(img, "gauss")
-
+        if self.target_lost:
+            box, max_resp = self.relocalize(img, "gauss")
+            return box, max_resp
         #     for box in self.boxes:
 
         #         x1,y1 = int(box[0]), int(box[1])
